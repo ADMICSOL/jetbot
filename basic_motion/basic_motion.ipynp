@@ -1,1 +1,53 @@
+class EnhancedNLPCommandProcessor:
+    def __init__(self, robot_controller, navigation_system):
+        self.controller = robot_controller
+        self.navigation_system = navigation_system
+        self.classifier = pipeline("zero-shot-classification")
+        self.nlp = spacy.load("en_core_web_sm")
+        self.context = []
+        self.load_command_patterns()
 
+    def load_command_patterns(self):
+        self.command_patterns = {
+            'navigate': {
+                'patterns': [
+                    r'(?:go to|navigate to) room (\d+) on the (ground floor|second floor)',
+                    r'(?:go to|navigate to) room (\d+)',
+                    r'(?:go to|navigate to) the (ground floor|second floor)',
+                ],
+                'handler': self._handle_navigate
+            },
+            'return': {
+                'patterns': [
+                    r'return to start',
+                    r'come back',
+                    r'go back to the starting point',
+                ],
+                'handler': self._handle_return
+            }
+        }
+        self.compiled_patterns = {}
+        for command_type, data in self.command_patterns.items():
+            self.compiled_patterns[command_type] = [
+                (re.compile(pattern, re.IGNORECASE), data['handler'])
+                for pattern in data['patterns']
+            ]
+
+    def _handle_navigate(self, match, text):
+        room_number = match.group(1)
+        floor = match.group(2) if match.group(2) else 'ground_floor'
+        room = f'room_{room_number}'
+        return self.navigation_system.navigate_to_room(floor, room)
+
+    def _handle_return(self, match, text):
+        return self.navigation_system.return_to_start()
+
+    def process_command(self, text: str) -> str:
+        for command_type, patterns in self.compiled_patterns.items():
+            for pattern, handler in patterns:
+                match = pattern.search(text)
+                if match:
+                    return handler(match, text)
+        return "Command not recognized."
+
+nlp_processor = EnhancedNLPCommandProcessor(jetbot_ui.robot_controller, navigation_system)
