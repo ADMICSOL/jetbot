@@ -1,1 +1,1747 @@
-#notebook
+from jetbot import Robot, Camera
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import threading
+import time
+from transformers import pipeline
+import re
+import math
+import queue
+from dataclasses import dataclass
+from typing import List, Callable, Optional, Dict, Any
+import numpy as np
+from datetime import datetime, timedelta
+import json
+import logging
+
+import traitlets
+from jetbot import bgr8_to_jpeg
+
+import os
+import cv2
+from datetime import datetime
+import threading
+import spacy
+from spacy.lang.en import English
+from ipywidgets import widgets, HTML
+from traitlets import traitlets
+
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('JetBot')
+
+# Enhanced Command Types and States
+class RobotState:
+    def __init__(self):
+        self.position = {'x': 0, 'y': 0, 'orientation': 0}  # orientation in degrees
+        self.speed = 0.2
+        self.is_moving = False
+        self.current_action = None
+        self.battery_level = 100  # simulated battery level
+        self.total_distance = 0
+        self.start_time = datetime.now()
+        self.last_maintenance = datetime.now()
+
+@dataclass
+class Command:
+    action: str
+    params: dict
+    duration: Optional[float] = None
+    next_command: Optional['Command'] = None
+    condition: Optional[Callable[[], bool]] = None
+    repeat_count: int = 1
+    priority: int = 1  # Higher number = higher priority
+
+class AdvancedCommandQueue:
+    def __init__(self):
+        self.main_queue = queue.PriorityQueue()  # For priority-based execution
+        self.conditional_queue = []  # For commands with conditions
+        self.loop_queue = []  # For repeating commands
+        self.is_paused = False
+        self.current_command = None
+        self.history = []  # Command history for learning
+    
+    def add(self, command: Command):
+        if command.condition:
+            self.conditional_queue.append(command)
+        elif command.repeat_count > 1 or command.repeat_count == -1:  # -1 for infinite
+            self.loop_queue.append(command)
+        else:
+            self.main_queue.put((-command.priority, command))
+    
+    def clear(self):
+        while not self.main_queue.empty():
+            self.main_queue.get()
+        self.conditional_queue.clear()
+        self.loop_queue.clear()
+        self.current_command = None
+
+
+class EnhancedRobotController:
+    def __init__(self):
+        self.robot = Robot()
+        self.command_queue = AdvancedCommandQueue()
+        self.state = RobotState()
+        self.is_running = True
+        self.emergency_stop = False
+#         self.diagnostics = diagnostics_display()
+        
+        # Enhanced shapes with parameters
+        self.shapes = {
+            'square': self._make_square,
+            'rectangle': self._make_rectangle,
+            'triangle': self._make_triangle,
+            'circle': self._make_circle,
+            'polygon': self._make_polygon,
+            'star': self._make_star,
+            'spiral': self._make_spiral
+        }
+        
+    # Add basic movement methods
+    def move_forward(self, steps=1):
+        """Move the robot forward"""
+        try:
+            self.robot.forward(speed=self.state.speed)
+            time.sleep(steps * 0.5)  # Adjust time based on steps
+            self.robot.stop()
+            # Update position (simplified)
+            self.state.position['x'] += steps * math.cos(math.radians(self.state.position['orientation']))
+            self.state.position['y'] += steps * math.sin(math.radians(self.state.position['orientation']))
+            self.state.total_distance += steps
+        except Exception as e:
+            logger.error(f"Forward movement error: {str(e)}")
+            raise
+
+    def move_backward(self, steps=1):
+        """Move the robot backward"""
+        try:
+            self.robot.backward(speed=self.state.speed)
+            time.sleep(steps * 0.5)  # Adjust time based on steps
+            self.robot.stop()
+            # Update position (simplified)
+            self.state.position['x'] -= steps * math.cos(math.radians(self.state.position['orientation']))
+            self.state.position['y'] -= steps * math.sin(math.radians(self.state.position['orientation']))
+            self.state.total_distance += steps
+        except Exception as e:
+            logger.error(f"Backward movement error: {str(e)}")
+            raise
+
+    def turn_left(self, degrees=90):
+        """Turn the robot left"""
+        try:
+            self.robot.left(speed=self.state.speed)
+            time.sleep(degrees * 0.01)  # Adjust time based on degrees
+            self.robot.stop()
+            # Update orientation
+            self.state.position['orientation'] = (self.state.position['orientation'] + degrees) % 360
+        except Exception as e:
+            logger.error(f"Left turn error: {str(e)}")
+            raise
+
+    def turn_right(self, degrees=90):
+        """Turn the robot right"""
+        try:
+            self.robot.right(speed=self.state.speed)
+            time.sleep(degrees * 0.01)  # Adjust time based on degrees
+            self.robot.stop()
+            # Update orientation
+            self.state.position['orientation'] = (self.state.position['orientation'] - degrees) % 360
+        except Exception as e:
+            logger.error(f"Right turn error: {str(e)}")
+            raise
+
+    def stop(self):
+        """Stop the robot"""
+        try:
+            self.robot.stop()
+            self.state.is_moving = False
+        except Exception as e:
+            logger.error(f"Stop error: {str(e)}")
+            raise
+
+    def set_speed(self, speed):
+        """Set the robot's speed"""
+        try:
+            self.state.speed = min(max(speed, 0.0), 1.0)  # Clamp between 0 and 1
+        except Exception as e:
+            logger.error(f"Speed setting error: {str(e)}")
+            raise
+
+    # Add record and replay functionality
+    def record_path(self):
+        """Start recording the robot's path"""
+        self.recording_path = []
+        self.is_recording = True
+        logger.info("Started recording path")
+
+    def replay_path(self):
+        """Replay the recorded path"""
+        if hasattr(self, 'recording_path') and self.recording_path:
+            for command in self.recording_path:
+                if isinstance(command, dict):
+                    action = command.get('action')
+                    params = command.get('params', {})
+                    if hasattr(self, action):
+                        method = getattr(self, action)
+                        method(**params)
+                        time.sleep(0.5)
+        else:
+            logger.warning("No recorded path to replay")
+    def _make_square(self, size: float = 2.0):
+        """
+        Draw a square pattern
+        Args:
+            size: Length of each side in units
+        """
+        for _ in range(4):
+            self.move_forward(steps=size)
+            self.turn_right(90)
+            time.sleep(0.5)  # Small delay between movements
+    
+    def _make_rectangle(self, length: float = 3.0, width: float = 2.0):
+        """
+        Draw a rectangle pattern
+        Args:
+            length: Length of the long sides
+            width: Length of the short sides
+        """
+        for i in range(4):
+            distance = length if i % 2 == 0 else width
+            self.move_forward(steps=distance)
+            self.turn_right(90)
+            time.sleep(0.5)
+    
+    def _make_triangle(self, size: float = 2.0, triangle_type: str = 'equilateral'):
+        """
+        Draw a triangle pattern
+        Args:
+            size: Length of sides
+            triangle_type: Type of triangle ('equilateral', 'right', 'isosceles')
+        """
+        if triangle_type == 'equilateral':
+            angles = [120, 120, 120]
+        elif triangle_type == 'right':
+            angles = [90, 135, 135]
+        else:  # isosceles
+            angles = [120, 120, 120]
+            
+        for angle in angles:
+            self.move_forward(steps=size)
+            self.turn_right(angle)
+            time.sleep(0.5)
+    
+    def _make_circle(self, radius: float = 2.0, segments: int = 36):
+        """
+        Draw a circular pattern
+        Args:
+            radius: Radius of the circle
+            segments: Number of segments to approximate the circle
+        """
+        # Calculate the length of each segment
+        segment_length = 2 * math.pi * radius / segments
+        angle = 360 / segments
+
+        for _ in range(segments):
+            self.move_forward(steps=segment_length)
+            self.turn_right(angle)
+            time.sleep(0.1)
+    
+    def _make_polygon(self, sides: int = 5, size: float = 2.0):
+        """
+        Draw a regular polygon
+        Args:
+            sides: Number of sides
+            size: Length of each side
+        """
+        angle = 360 / sides
+        for _ in range(sides):
+            self.move_forward(steps=size)
+            self.turn_right(angle)
+            time.sleep(0.5)
+    
+    def _make_star(self, points: int = 5, size: float = 2.0):
+        """
+        Draw a star pattern
+        Args:
+            points: Number of points in the star
+            size: Size of the star's arms
+        """
+        angle = 360 / points
+        inner_angle = 180 - (180 / points)
+        
+        for _ in range(points):
+            self.move_forward(steps=size)
+            self.turn_right(inner_angle)
+            self.move_forward(steps=size)
+            self.turn_left(180 - (angle - inner_angle))
+            time.sleep(0.5)
+    
+    def _make_spiral(self, start_size: float = 0.5, growth: float = 0.2, turns: int = 5):
+        """
+        Draw a spiral pattern
+        Args:
+            start_size: Starting size of spiral
+            growth: How much the spiral grows each turn
+            turns: Number of complete turns
+        """
+        size = start_size
+        segments = turns * 4  # 4 segments per turn for smooth spiral
+        angle = 360 / (segments / turns)
+        
+        for _ in range(segments):
+            self.move_forward(steps=size)
+            self.turn_right(angle)
+            size += growth / 4  # Divide growth by 4 since we have 4 segments per turn
+            time.sleep(0.1)
+
+        
+        # Initialize monitoring systems
+        self._init_monitoring()
+        
+        # Start processing threads
+        self._start_threads()
+    
+    def _init_monitoring(self):
+        """Initialize monitoring and diagnostic systems"""
+        self.diagnostics = {
+            'temperature': 0,
+            'motor_health': 100,
+            'camera_status': 'OK',
+            'last_maintenance': datetime.now(),
+            'total_runtime': timedelta(0),
+            'total_distance': 0
+        }
+        
+        # Start monitoring thread
+        threading.Thread(target=self._monitor_system, daemon=True).start()
+    
+    def _start_threads(self):
+        """Start all necessary background threads"""
+        threads = [
+            ('command_processor', self._process_commands),
+            ('condition_checker', self._check_conditions),
+            ('battery_monitor', self._monitor_battery),
+            ('movement_optimizer', self._optimize_movement)
+        ]
+        
+        for name, target in threads:
+            thread = threading.Thread(target=target, name=name, daemon=True)
+            thread.start()
+            
+    def _move_custom_pattern(self, pattern_data: List[tuple] = None):
+        """
+        Execute a custom movement pattern defined by a list of waypoints or commands
+        
+        Args:
+            pattern_data: List of tuples containing either:
+                         - (x, y) coordinates to move to
+                         - (action, params) movement commands
+        """
+        if pattern_data is None:
+            # Default pattern - make a diamond shape
+            pattern_data = [
+                ('forward', {'steps': 2}),
+                ('right', {'degrees': 45}),
+                ('forward', {'steps': 2}),
+                ('right', {'degrees': 135}),
+                ('forward', {'steps': 2}),
+                ('right', {'degrees': 45}),
+                ('forward', {'steps': 2}),
+                ('right', {'degrees': 135})
+            ]
+        
+        for action in pattern_data:
+            if isinstance(action, tuple) and len(action) == 2:
+                if isinstance(action[0], (int, float)):
+                    # Coordinate-based movement
+                    x, y = action
+                    self.move_to_coordinate(x, y)
+                else:
+                    # Command-based movement
+                    command, params = action
+                    if hasattr(self, command):
+                        method = getattr(self, command)
+                        method(**params)
+            time.sleep(0.5)  # Small delay between actions
+    # Enhanced Movement Commands
+    def set_speed_profile(self, profile: str):
+        """Set complex speed profiles like 'accelerate', 'decelerate', 'smooth'"""
+        profiles = {
+            'accelerate': lambda t: min(self.state.speed * (1 + t/2), 1.0),
+            'decelerate': lambda t: max(self.state.speed * (1 - t/2), 0.1),
+            'smooth': lambda t: self.state.speed * (1 + math.sin(t))/2
+        }
+        if profile in profiles:
+            self.speed_profile = profiles[profile]
+    
+    def move_to_coordinate(self, x: float, y: float, avoid_obstacles: bool = True):
+        """Move to specific coordinates with optional obstacle avoidance"""
+        current_x, current_y = self.state.position['x'], self.state.position['y']
+        angle = math.atan2(y - current_y, x - current_x)
+        distance = math.sqrt((x - current_x)**2 + (y - current_y)**2)
+        
+        if avoid_obstacles:
+            path = self._plan_path(current_x, current_y, x, y)
+            for waypoint in path:
+                self._move_to_waypoint(waypoint)
+        else:
+            self._rotate_to_angle(math.degrees(angle))
+            self.move_forward(steps=distance)
+    
+    def _move_spiral(self, size: float = 1.0, revolutions: int = 2):
+        """Move in a spiral pattern"""
+        for t in np.linspace(0, 2*math.pi*revolutions, 100):
+            r = size * t/(2*math.pi)
+            x = r * math.cos(t)
+            y = r * math.sin(t)
+            self.move_to_coordinate(x, y, avoid_obstacles=True)
+    
+    def _move_zigzag(self, width: float, height: float, steps: int):
+        """Move in a zigzag pattern"""
+        for i in range(steps):
+            x = width * (i // 2)
+            y = height if i % 2 else 0
+            self.move_to_coordinate(x, y)
+    
+    def _move_figure_eight(self, size: float = 1.0):
+        """Move in a figure-eight pattern"""
+        for t in np.linspace(0, 2*math.pi, 100):
+            x = size * math.sin(t)
+            y = size * math.sin(t) * math.cos(t)
+            self.move_to_coordinate(x, y)
+    
+    # Enhanced Shape Drawing
+    def _make_star(self, points: int = 5, size: float = 1.0):
+        """Draw a star pattern"""
+        angle = 360 / points
+        for _ in range(points):
+            self.move_forward(size)
+            self.turn_right(180 - angle)
+    
+    def _make_polygon(self, sides: int, size: float = 1.0):
+        """Draw any regular polygon"""
+        angle = 360 / sides
+        for _ in range(sides):
+            self.move_forward(size)
+            self.turn_right(angle)
+    
+    # Advanced Control Features
+    def follow_object(self, object_type: str, distance: float = 1.0):
+        """Follow a specified object while maintaining distance"""
+        # Implementation would require computer vision integration
+        pass
+    
+    def navigate_to_marker(self, marker_id: int):
+        """Navigate to a specific AR marker"""
+        # Implementation would require AR marker detection
+        pass
+    
+    def record_path(self):
+        """Start recording current movement path"""
+        self.recording_path = []
+        self.is_recording = True
+    
+    def replay_path(self):
+        """Replay recorded path"""
+        if hasattr(self, 'recording_path'):
+            for command in self.recording_path:
+                self.execute_command(command)
+    
+    # System Monitoring and Safety
+    def _monitor_system(self):
+        """Monitor system health and performance"""
+        while self.is_running:
+            # Update diagnostics
+            self.diagnostics['temperature'] = self._get_temperature()
+            self.diagnostics['motor_health'] = self._check_motor_health()
+            self.diagnostics['total_runtime'] = datetime.now() - self.state.start_time
+            
+            # Check for warning conditions
+            if self.diagnostics['temperature'] > 80:
+                logger.warning("High temperature detected!")
+                self._handle_overheating()
+            
+            time.sleep(5)
+    
+    def _monitor_battery(self):
+        """Monitor battery level and manage power consumption"""
+        while self.is_running:
+            self.state.battery_level = self._get_battery_level()
+            if self.state.battery_level < 10:
+                logger.warning("Low battery! Initiating power saving mode.")
+                self._enable_power_saving()
+            time.sleep(60)
+    
+    def _optimize_movement(self):
+        """Optimize movement patterns based on performance history"""
+        while self.is_running:
+            if len(self.command_queue.history) > 100:
+                patterns = self._analyze_movement_patterns()
+                self._update_movement_parameters(patterns)
+            time.sleep(300)
+    
+    # Helper Methods
+    def _plan_path(self, start_x: float, start_y: float, end_x: float, end_y: float) -> List[tuple]:
+        """Plan path avoiding obstacles using A* algorithm"""
+        # Implementation of A* pathfinding
+        return [(end_x, end_y)]  # Simplified for this example
+    
+    def _rotate_to_angle(self, target_angle: float):
+        """Rotate to specific angle relative to starting orientation"""
+        current_angle = self.state.position['orientation']
+        delta_angle = target_angle - current_angle
+        
+        # Normalize angle to -180 to 180 range
+        if delta_angle > 180:
+            delta_angle -= 360
+        elif delta_angle < -180:
+            delta_angle += 360
+            
+        if delta_angle > 0:
+            self.turn_right(abs(delta_angle))
+        else:
+            self.turn_left(abs(delta_angle))
+    
+    def _handle_overheating(self):
+        """Handle overheating condition"""
+        self.set_speed(self.state.speed * 0.5)
+        time.sleep(30)  # Cool-down period
+    
+    def _enable_power_saving(self):
+        """Enable power saving mode"""
+        self.set_speed(self.state.speed * 0.7)
+        # Disable non-essential features
+        pass
+
+class EnhancedNLPCommandProcessor:
+    def __init__(self, robot_controller: EnhancedRobotController):
+        self.controller = robot_controller
+        self.classifier = pipeline("zero-shot-classification")
+        # Load spaCy model for better natural language understanding
+        self.nlp = spacy.load("en_core_web_sm")
+        self.context = []  # Store conversation context
+        self.load_command_patterns()
+    
+    def _handle_measured_movement(self, match, text):
+        """Handle measured movement commands"""
+        amount = float(match.group(1))
+        unit = match.group(2)
+        direction = match.group(3)
+        
+        # Convert to steps based on unit
+        steps = {
+            'step': amount,
+            'meter': amount * 20,  # Approximate steps per meter
+            'feet': amount * 6     # Approximate steps per foot
+        }[unit.rstrip('s')]
+        
+        if direction == 'forward':
+            self.controller.move_forward(steps=steps)
+            return f"Moving forward {amount} {unit} 🚀"
+        else:
+            self.controller.move_backward(steps=steps)
+            return f"Moving backward {amount} {unit} ⏪"
+    
+    def _pause_execution(self):
+        """Pause the robot's command execution"""
+        self.controller.command_queue.is_paused = True
+        return "Execution paused"
+
+    def _resume_execution(self):
+        """Resume the robot's command execution"""
+        self.controller.command_queue.is_paused = False
+        return "Execution resumed"
+
+    def _emergency_stop(self):
+        """Emergency stop all robot operations"""
+        self.controller.emergency_stop = True
+        self.controller.stop()
+        self.controller.command_queue.clear()
+        return "Emergency stop activated"
+
+    def _check_obstacle_proximity(self):
+        """Check if there are obstacles nearby"""
+        # This would normally use actual sensor data
+        # For now, return a default value
+        return False
+
+    def _check_at_destination(self):
+        """Check if robot has reached its destination"""
+        return False 
+    
+    
+    def _handle_turn(self, match, text, entities=None):
+        """Handle turn commands"""
+        direction = match.group(1)
+        degrees = float(match.group(2))
+        
+        if direction == 'left':
+            self.controller.turn_left(degrees)
+            return f"Turning left {degrees}° ↩️"
+        else:
+            self.controller.turn_right(degrees)
+            return f"Turning right {degrees}° ↪️"
+    
+    def _handle_movement(self, match, text, entities=None):
+        """Handle movement commands with specific distance measurements"""
+        try:
+            amount = float(match.group(1))  # Capture the amount (e.g., 3)
+            unit = match.group(2)           # Capture the unit (e.g., steps)
+            direction = match.group(3)      # Capture the direction (e.g., forward)
+
+            # Default direction if not explicitly provided
+            if direction is None:
+                direction = 'forward'
+
+            # Convert to steps based on unit
+            steps = {
+                'step': amount,
+                'meter': amount * 20,  # Approximate steps per meter
+                'feet': amount * 6     # Approximate steps per foot
+            }[unit.rstrip('s')]
+
+            if direction == 'forward':
+                self.controller.move_forward(steps=steps)
+                return f"Moving forward {amount} {unit} 🚀"
+            else:
+                self.controller.move_backward(steps=steps)
+                return f"Moving backward {amount} {unit} ⏪"
+        except Exception as e:
+            return f"Error processing movement command: {str(e)}"
+
+    
+    def _handle_rotation(self, match, text, entities=None):
+        """Handle rotation commands"""
+        degrees = float(match.group(1))
+        direction = match.group(2)
+        
+        if direction == 'clockwise':
+            self.controller.turn_right(degrees)
+            return f"Rotating {degrees}° clockwise ↪️"
+        else:
+            self.controller.turn_left(degrees)
+            return f"Rotating {degrees}° counterclockwise ↩️"
+    
+    def _handle_goto_position(self, match, text, entities=None):
+        """Handle movement to coordinates"""
+        x = float(match.group(1))
+        y = float(match.group(2))
+        self.controller.move_to_coordinate(x, y)
+        return f"Moving to position ({x}, {y}) 📍"
+    
+    def _handle_shape(self, match, text):
+        """Handle shape drawing commands"""
+        shape = match.group(1).lower()
+        size = float(match.group(2)) if match.group(2) else 2.0
+
+        if shape in self.controller.shapes:
+            if shape == 'circle':
+                # Call _make_circle with radius and segments
+                self.controller.shapes[shape](radius=size, segments=36)
+            elif shape == 'rectangle':
+                # Call _make_rectangle with length and width
+                self.controller.shapes[shape](length=size, width=size * 0.75)
+            else:
+                # Call other shapes with size
+                self.controller.shapes[shape](size=size)
+            return f"Drawing a {shape} with size {size} ⬜"
+        return "Unknown shape pattern ❓"
+    
+    def _handle_pattern(self, match, text, entities=None):
+        """Handle movement pattern commands"""
+        pattern = match.group(1).lower().replace(' ', '_')
+        size = float(match.group(2)) if match.group(2) else 1.0
+        
+        if pattern in self.controller.movement_patterns:
+            self.controller.movement_patterns[pattern](size)
+            return f"Executing {pattern} pattern with size {size} 🔄"
+        return "Unknown pattern type ❓"
+    
+    def _handle_patrol(self, match, text, entities=None):
+        """Handle patrol commands"""
+        area_type = match.group(1)
+        radius = float(match.group(2)) if match.group(2) else 5.0
+        
+        if area_type == 'perimeter':
+            self.controller._make_square(size=radius)
+        else:  # area patrol
+            self.controller._move_zigzag(radius, radius, 5)
+        return f"Patrolling {area_type} with radius {radius} 🔍"
+    
+    def _handle_follow(self, match, text, entities=None):
+        """Handle follow commands"""
+        target = match.group(1)
+        distance = float(match.group(2)) if match.group(2) else 1.0
+        
+        if hasattr(self.controller, f'follow_{target}'):
+            method = getattr(self.controller, f'follow_{target}')
+            method(distance=distance)
+            return f"Following {target} at distance {distance} 👀"
+        return f"Cannot follow {target} ❌"
+    
+    def _handle_navigation(self, match, text, entities=None):
+        """Handle navigation commands"""
+        target_type = match.group(1)
+        target_id = int(match.group(2))
+        
+        if hasattr(self.controller, f'navigate_to_{target_type}'):
+            method = getattr(self.controller, f'navigate_to_{target_type}')
+            method(target_id)
+            return f"Navigating to {target_type} {target_id} 🎯"
+        return f"Cannot navigate to {target_type} ❌"
+    
+    def _handle_speed(self, match, text, entities=None):
+        """Handle speed commands"""
+        speed = match.group(1)
+        
+        if speed in ['slow', 'moderate', 'fast']:
+            speed_values = {'slow': 0.1, 'moderate': 0.2, 'fast': 0.4}
+            self.controller.set_speed(speed_values[speed])
+        else:
+            self.controller.set_speed(float(speed))
+        return f"Set speed to {speed} 🏃"
+    
+    def _handle_recording(self, match, text, entities=None):
+        """Handle recording commands"""
+        action = match.group(1)
+        
+        if action == 'start':
+            self.controller.record_path()
+            return "Started recording path 📹"
+        else:
+            self.controller.is_recording = False
+            return "Stopped recording path ⏹️"
+    
+    def _handle_replay(self, match, text, entities=None):
+        """Handle replay commands"""
+        self.controller.replay_path()
+        return "Replaying recorded path ▶️"
+    
+    def _handle_wait(self, match, text, entities=None):
+        """Handle wait commands"""
+        duration = int(match.group(1))
+        unit = match.group(2)
+        
+        seconds = duration * (60 if 'minute' in unit else 1)
+        time.sleep(seconds)
+        return f"Waited for {duration} {unit} ⏳"
+    
+    def _handle_conditional(self, match, text, entities=None):
+        """Handle conditional commands"""
+        condition = match.group(1)
+        action = match.group(2)
+        
+        condition_func = self._parse_condition(condition)
+        command = Command(
+            action="process_command",
+            params={"text": action},
+            condition=condition_func
+        )
+        self.controller.command_queue.add(command)
+        return f"Added conditional command: if {condition} then {action} 🔄"
+    
+    def _handle_while_loop(self, match, text, entities=None):
+        """Handle while loop commands"""
+        condition = match.group(1)
+        action = match.group(2)
+        
+        condition_func = self._parse_condition(condition)
+        command = Command(
+            action="process_command",
+            params={"text": action},
+            condition=condition_func,
+            repeat_count=-1  # Infinite repeat
+        )
+        self.controller.command_queue.add(command)
+        return f"Added while loop: while {condition} do {action} 🔄"
+    
+    def _handle_repeat(self, match, text, entities=None):
+        """Handle repeat commands"""
+        count = int(match.group(1))
+        action = match.group(2)
+        
+        for _ in range(count):
+            self.process_command(action)
+        return f"Repeated '{action}' {count} times 🔁"
+
+
+    def load_command_patterns(self):
+        """Enhanced pattern matching with more natural language variations"""
+
+        self.command_patterns = {
+            'movement': {
+                'patterns': [
+                    # Pattern for commands like "move 3 steps forward"
+                    r'(?:can you )?(?:please )?(?:move|go|travel|proceed) (?:forward|backwards?|ahead|back)(?: for| by)? (?:about |around |approximately )?(\d+(?:\.\d+)?) (steps?|meters?|feet|cm|inches)(?: (forward|backwards?|ahead|back))?',
+                    # Pattern for commands like "move 3 steps"
+                    r'(?:can you )?(?:please )?(?:move|go|travel) (\d+(?:\.\d+)?) (steps?|meters?|feet|cm|inches)(?: (forward|backwards?|ahead|back))?',
+                    # Pattern for commands like "move forward 3 steps"
+                    r'(?:can you )?(?:please )?(?:move|go|travel) (forward|backwards?|ahead|back)(?: for| by)? (?:about |around |approximately )?(\d+(?:\.\d+)?) (steps?|meters?|feet|cm|inches)',
+                ],
+                'handler': self._handle_movement
+        
+            },
+            'turn': {
+                'patterns': [
+                    r'(?:can you )?(?:please )?(?:turn|rotate) (?:to the )?(left|right)(?: by| for)? (?:about |around |approximately )?(\d+(?:\.\d+)?) degrees?',
+                    r'(?:can you )?(?:please )?(?:make|do) a (?:(\d+(?:\.\d+)?) degree )?(left|right) turn',
+                    r'(?:can you )?(?:please )?(?:turn|rotate) (\d+(?:\.\d+)?) degrees? (?:to the )?(left|right)',
+                ],
+                'handler': self._handle_turn
+            },
+            'shapes': {
+                'patterns': [
+                    r'(?:can you )?(?:please )?(?:draw|make|create) (?:me )?(?:a |an )?(square|rectangle|triangle|circle|polygon|star|spiral)(?: with (?:size|radius) (\d+(?:\.\d+)?))?',
+                    r'(?:can you )?(?:please )?(?:draw|make|create) (?:me )?(?:a |an )?(square|rectangle|triangle|circle|polygon|star|spiral)(?: that(?:\'s| is) (\d+(?:\.\d+)?) (?:units?|meters?|feet) (?:big|wide|large))?',
+                ],
+                'handler': self._handle_shape
+            },
+            'speed': {
+                'patterns': [
+                    r'(?:can you )?(?:please )?(?:set|change|adjust) (?:the )?speed (?:to |at )?(\d+(?:\.\d+)?|slow|moderate|fast|very slow|very fast)',
+                    r'(?:can you )?(?:please )?(?:go|move|travel) (faster|slower|much faster|much slower)',
+                    r'(?:can you )?(?:please )?(?:speed up|slow down)(?: a (?:bit|little|lot))?',
+                ],
+                'handler': self._handle_speed
+            }
+        }
+        
+        # Compile all patterns
+        self.compiled_patterns = {}
+        for command_type, data in self.command_patterns.items():
+            self.compiled_patterns[command_type] = [
+                (re.compile(pattern, re.IGNORECASE), data['handler'])
+                for pattern in data['patterns']
+            ]
+
+
+    def process_command(self, text: str) -> str:
+        """Process a full paragraph command with multiple actions"""
+        # Split the command into sub-commands using 'then', 'and', or commas
+        sub_commands = re.split(r'\s*(?:then|and|,)\s*', text, flags=re.IGNORECASE)
+
+        responses = []
+        for sub_command in sub_commands:
+            # Skip empty or whitespace-only sub-commands
+            if not sub_command.strip():
+                continue
+
+            try:
+                # Process each sub-command
+                response = self._process_single_command(sub_command.strip())
+                responses.append(response)
+
+                # Wait for the current command to complete
+                while self.controller.state.is_moving:
+                    time.sleep(0.1)  # Small delay to avoid busy-waiting
+            except Exception as e:
+                responses.append(f"Error processing command '{sub_command}': {str(e)}")
+
+        # Combine all responses into a single string
+        return " ".join(responses)
+
+    def _process_single_command(self, text: str) -> str:
+        """Process a single command (one sentence)"""
+        # Add to context
+        self.context.append(text)
+        if len(self.context) > 10:
+            self.context.pop(0)
+
+        # Parse with spaCy for better understanding
+        doc = self.nlp(text)
+
+        # Extract key information
+        intent = self._extract_intent(doc)
+        entities = self._extract_entities(doc)
+
+        # Try pattern matching first
+        matched = False
+        for command_type, patterns in self.compiled_patterns.items():
+            for pattern, handler in patterns:
+                match = pattern.search(text)
+                if match:
+                    # Call the handler with only match and text
+                    response = handler(match, text)
+                    return response
+
+        # Fallback to semantic understanding if no pattern matched
+        return self._handle_semantic_command(doc, intent, entities)
+
+    
+    def _extract_intent(self, doc) -> Dict[str, float]:
+        """Extract command intent using zero-shot classification"""
+        candidate_labels = [
+            "movement", "turn", "shape drawing", "speed adjustment",
+            "status request", "stop command", "pattern creation"
+        ]
+        
+        result = self.classifier(doc.text, candidate_labels)
+        return {
+            'primary': result['labels'][0],
+            'confidence': result['scores'][0],
+            'secondary': result['labels'][1] if len(result['labels']) > 1 else None
+        }
+    
+    def _extract_entities(self, doc) -> Dict[str, Any]:
+        """Extract relevant entities from the command"""
+        entities = {
+            'numbers': [],
+            'directions': [],
+            'units': [],
+            'shapes': [],
+            'speeds': []
+        }
+        
+        # Extract numbers
+        for token in doc:
+            if token.like_num:
+                entities['numbers'].append(float(token.text))
+            
+            # Extract directions
+            if token.text.lower() in ['forward', 'backward', 'left', 'right', 'up', 'down']:
+                entities['directions'].append(token.text.lower())
+            
+            # Extract units
+            if token.text.lower() in ['steps', 'meters', 'feet', 'degrees', 'units']:
+                entities['units'].append(token.text.lower())
+            
+            # Extract shapes
+            if token.text.lower() in ['square', 'circle', 'triangle', 'rectangle', 'spiral']:
+                entities['shapes'].append(token.text.lower())
+            
+            # Extract speeds
+            if token.text.lower() in ['fast', 'slow', 'faster', 'slower', 'speed']:
+                entities['speeds'].append(token.text.lower())
+        
+        return entities
+    
+    def _handle_semantic_command(self, doc, intent, entities) -> str:
+        """Handle commands based on semantic understanding"""
+        if intent['confidence'] < 0.3:
+            return "I'm not sure what you want me to do. Could you rephrase that?"
+        
+        if intent['primary'] == 'movement':
+            # Handle movement commands
+            direction = next((d for d in entities['directions']), 'forward')
+            distance = next((n for n in entities['numbers']), 1)
+            unit = next((u for u in entities['units']), 'steps')
+            
+            return self._execute_movement(direction, distance, unit)
+            
+        elif intent['primary'] == 'turn':
+            # Handle turn commands
+            direction = next((d for d in entities['directions'] if d in ['left', 'right']), 'right')
+            degrees = next((n for n in entities['numbers']), 90)
+            
+            return self._execute_turn(direction, degrees)
+            
+        elif intent['primary'] == 'shape drawing':
+            # Handle shape commands
+            shape = next((s for s in entities['shapes']), 'square')
+            size = next((n for n in entities['numbers']), 2.0)
+            
+            return self._execute_shape(shape, size)
+            
+        elif intent['primary'] == 'speed adjustment':
+            # Handle speed commands
+            speed_words = entities['speeds']
+            if 'faster' in speed_words:
+                return self._adjust_speed(1.2, 'multiply')
+            elif 'slower' in speed_words:
+                return self._adjust_speed(0.8, 'multiply')
+            else:
+                speed = next((n for n in entities['numbers']), None)
+                if speed is not None:
+                    return self._adjust_speed(speed, 'set')
+        
+        return f"I understood you want to {intent['primary']}, but I'm not sure about the details. Could you be more specific?"
+    
+    def _execute_movement(self, direction: str, distance: float, unit: str) -> str:
+        """Execute movement command with natural response"""
+        # Convert units to steps
+        unit_conversions = {
+            'steps': 1,
+            'meters': 20,
+            'feet': 6,
+            'cm': 0.2,
+            'inches': 0.5
+        }
+        
+        steps = distance * unit_conversions.get(unit.rstrip('s'), 1)
+        
+        if direction in ['forward', 'ahead']:
+            self.controller.move_forward(steps=steps)
+            return f"Moving forward {distance} {unit} 🚀"
+        else:
+            self.controller.move_backward(steps=steps)
+            return f"Moving backward {distance} {unit} ⏪"
+    
+    def _execute_turn(self, direction: str, degrees: float) -> str:
+        """Execute turn command with natural response"""
+        if direction == 'left':
+            self.controller.turn_left(degrees)
+            return f"Turning left {degrees}° ↩️"
+        else:
+            self.controller.turn_right(degrees)
+            return f"Turning right {degrees}° ↪️"
+    
+    def _execute_shape(self, shape: str, size: float) -> str:
+        """Execute shape drawing command with natural response"""
+        if shape in self.controller.shapes:
+            self.controller.shapes[shape](size=size)
+            return f"Drawing a {shape} with size {size} ⬜"
+        return f"I don't know how to draw a {shape} yet ❓"
+    
+    def _adjust_speed(self, value: float, mode: str = 'set') -> str:
+        """Adjust speed with natural response"""
+        current_speed = self.controller.state.speed
+        
+        if mode == 'multiply':
+            new_speed = current_speed * value
+        else:
+            new_speed = value
+            
+        # Clamp speed between 0 and 1
+        new_speed = max(0.1, min(1.0, new_speed))
+        self.controller.set_speed(new_speed)
+        
+        if mode == 'multiply':
+            return f"{'Increased' if value > 1 else 'Decreased'} speed to {new_speed:.1f} 🏃"
+        else:
+            return f"Set speed to {new_speed:.1f} 🏃"
+
+    def _handle_status(self, match, text):
+        """Handle status report request"""
+        state = self.controller.state
+        diagnostics = self.controller.diagnostics
+        
+        status_report = f"""Status Report:
+Position: ({state.position['x']:.2f}, {state.position['y']:.2f})
+Orientation: {state.position['orientation']}°
+Speed: {state.speed:.2f}
+Battery: {state.battery_level}%
+Temperature: {diagnostics['temperature']}°C
+Motor Health: {diagnostics['motor_health']}%
+Total Distance: {state.total_distance:.2f}m
+Runtime: {datetime.now() - state.start_time}"""
+        
+        return status_report
+
+    def _handle_calibration(self, match, text):
+        """Handle calibration commands"""
+        component = match.group(1)
+        
+        if component == 'all':
+            # Simulate calibration of all components
+            time.sleep(2)
+            return "Calibrated all components successfully 🔧"
+        
+        # Simulate calibration of specific component
+        time.sleep(1)
+        return f"Calibrated {component} successfully 🔧"
+
+    def _handle_save(self, match, text):
+        """Handle save commands"""
+        save_type = match.group(1)
+        name = match.group(2)
+        
+        # Create save data based on type
+        save_data = {
+            'configuration': self.controller.state.__dict__,
+            'settings': {
+                'speed': self.controller.state.speed,
+                'position': self.controller.state.position
+            },
+            'path': self.controller.recording_path if hasattr(self.controller, 'recording_path') else []
+        }
+        
+        # Simulate saving to file
+        try:
+            with open(f"{name}.json", 'w') as f:
+                json.dump(save_data[save_type], f)
+            return f"Saved {save_type} as '{name}' 💾"
+        except Exception as e:
+            return f"Failed to save {save_type}: {str(e)} ❌"
+
+    def _handle_load(self, match, text):
+        """Handle load commands"""
+        load_type = match.group(1)
+        name = match.group(2)
+        
+        # Simulate loading from file
+        try:
+            with open(f"{name}.json", 'r') as f:
+                data = json.load(f)
+            
+            if load_type == 'configuration':
+                self.controller.state.__dict__.update(data)
+            elif load_type == 'settings':
+                self.controller.state.speed = data['speed']
+                self.controller.state.position = data['position']
+            elif load_type == 'path':
+                self.controller.recording_path = data
+            
+            return f"Loaded {load_type} '{name}' successfully 📂"
+        except FileNotFoundError:
+            return f"Could not find {load_type} file '{name}' ❌"
+        except Exception as e:
+            return f"Failed to load {load_type}: {str(e)} ❌"
+        
+
+    
+    def _handle_generic_command(self, text: str) -> str:
+        """Handle commands that don't match any patterns using zero-shot classification"""
+        candidate_labels = [
+            "move forward", "move backward", "turn left", "turn right",
+            "stop", "pause", "resume", "emergency stop", "help",
+            "speed up", "slow down", "start recording", "stop recording"
+        ]
+        
+        result = self.classifier(text, candidate_labels)
+        top_label = result['labels'][0]
+        confidence = result['scores'][0]
+        
+        if confidence < 0.5:
+            return "I'm not sure what you want me to do. Could you rephrase that? 🤔"
+        
+        # Map classified label to action
+        action_map = {
+            "move forward": (self.controller.move_forward, "Moving forward 🚀"),
+            "move backward": (self.controller.move_backward, "Moving backward ⏪"),
+            "turn left": (self.controller.turn_left, "Turning left ↩️"),
+            "turn right": (self.controller.turn_right, "Turning right ↪️"),
+            "stop": (self.controller.stop, "Stopped 🛑"),
+            "pause": (self._pause_execution, "Paused execution ⏸️"),
+            "resume": (self._resume_execution, "Resumed execution ▶️"),
+            "emergency stop": (self._emergency_stop, "EMERGENCY STOP ACTIVATED 🚨"),
+            "speed up": (lambda: self.controller.set_speed(self.controller.state.speed * 1.2), "Increased speed 🏃"),
+            "slow down": (lambda: self.controller.set_speed(self.controller.state.speed * 0.8), "Decreased speed 🚶"),
+            "start recording": (self.controller.record_path, "Started recording path 📹"),
+            "stop recording": (lambda: setattr(self.controller, 'is_recording', False), "Stopped recording path ⏹️"),
+            "help": (self._show_help, "Showing help 💡")
+        }
+        
+        if top_label in action_map:
+            action, message = action_map[top_label]
+            action()
+            return message
+        
+        return "Command not recognized ❓"
+    
+    def _handle_measured_movement(self, match, text):
+        """Handle movement with specific distance measurements"""
+        amount = float(match.group(1))
+        unit = match.group(2)
+        direction = match.group(3)
+        
+        # Convert to steps based on unit
+        steps = {
+            'step': amount,
+            'meter': amount * 20,  # Approximate steps per meter
+            'feet': amount * 6     # Approximate steps per foot
+        }[unit.rstrip('s')]
+        
+        if direction == 'forward':
+            self.controller.move_forward(steps=steps)
+            return f"Moving forward {amount} {unit} 🚀"
+        else:
+            self.controller.move_backward(steps=steps)
+            return f"Moving backward {amount} {unit} ⏪"
+    
+    def _handle_rotation(self, match, text):
+        """Handle precise rotation commands"""
+        degrees = float(match.group(1))
+        direction = match.group(2)
+        
+        if direction == 'clockwise':
+            self.controller.turn_right(degrees)
+            return f"Rotating {degrees}° clockwise ↪️"
+        else:
+            self.controller.turn_left(degrees)
+            return f"Rotating {degrees}° counterclockwise ↩️"
+    
+    def _handle_goto_position(self, match, text):
+        """Handle movement to specific coordinates"""
+        x = float(match.group(1))
+        y = float(match.group(2))
+        self.controller.move_to_coordinate(x, y)
+        return f"Moving to position ({x}, {y}) 📍"
+    
+    def _handle_pattern(self, match, text):
+        """Handle complex movement patterns"""
+        pattern = match.group(1).lower().replace(' ', '_')
+        size = float(match.group(2)) if match.group(2) else 1.0
+        
+        if pattern in self.controller.movement_patterns:
+            self.controller.movement_patterns[pattern](size)
+            return f"Executing {pattern} pattern with size {size} 🔄"
+        return "Unknown pattern type ❓"
+    
+    def _handle_patrol(self, match, text):
+        """Handle patrol commands"""
+        area_type = match.group(1)
+        radius = float(match.group(2)) if match.group(2) else 5.0
+        
+        if area_type == 'perimeter':
+            self.controller._make_square(size=radius)
+        else:  # area patrol
+            self.controller._move_zigzag(radius, radius, 5)
+        return f"Patrolling {area_type} with radius {radius} 🔍"
+    
+    def _handle_conditional(self, match, text):
+        """Handle if-then conditional commands"""
+        condition = match.group(1)
+        action = match.group(2)
+        
+        # Create condition function
+        condition_func = self._parse_condition(condition)
+        
+        # Create command with condition
+        command = Command(
+            action="process_command",
+            params={"text": action},
+            condition=condition_func
+        )
+        self.controller.command_queue.add(command)
+        return f"Added conditional command: if {condition} then {action} 🔄"
+    
+    def _parse_condition(self, condition: str) -> Callable[[], bool]:
+        """Parse condition string into callable function"""
+        # Example conditions
+        conditions = {
+            'battery low': lambda: self.controller.state.battery_level < 20,
+            'near obstacle': lambda: self._check_obstacle_proximity(),
+            'at destination': lambda: self._check_at_destination(),
+        }
+        
+        for key, func in conditions.items():
+            if key in condition.lower():
+                return func
+        return lambda: True  # Default to always true if condition not recognized
+    
+    def _handle_while_loop(self, match, text):
+        """Handle while loop commands"""
+        condition = match.group(1)
+        action = match.group(2)
+        
+        condition_func = self._parse_condition(condition)
+        command = Command(
+            action="process_command",
+            params={"text": action},
+            condition=condition_func,
+            repeat_count=-1  # Infinite repeat
+        )
+        self.controller.command_queue.add(command)
+        return f"Added while loop: while {condition} do {action} 🔄"
+    
+    def _show_help(self):
+        """Show available commands and their formats"""
+        help_text = """
+Available Commands:
+1. Movement:
+   - "move X steps/meters/feet forward/backward"
+   - "turn left/right X degrees"
+   - "go to position (X,Y)"
+
+2. Patterns:
+   - "make square/rectangle/triangle/circle"
+   - "draw spiral/zigzag/figure-eight"
+
+3. Control:
+   - "set speed slow/moderate/fast"
+   - "start/stop recording"
+   - "wait X seconds/minutes"
+
+4. Complex:
+   - "if [condition] then [action]"
+   - "while [condition] do [action]"
+   - "repeat X times: [action]"
+
+5. System:
+   - "status report"
+   - "calibrate sensors/motors"
+   - "save/load configuration"
+        """
+        return help_text
+
+
+class VideoRecorder:
+    def __init__(self, camera):
+        self.camera = camera
+        self.recording = False
+        self.video_writer = None
+        self.recording_thread = None
+        self.current_filename = None
+        
+        # Create Live_Videos directory if it doesn't exist
+        self.videos_dir = 'Live_Videos'
+        if not os.path.exists(self.videos_dir):
+            os.makedirs(self.videos_dir)
+            
+    def start_recording(self):
+        """Start recording video from camera"""
+        if self.recording:
+            return False
+            
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.current_filename = os.path.join(self.videos_dir, f'recording_{timestamp}.avi')
+        
+        # Initialize video writer
+        frame = self.camera.value
+        height, width = frame.shape[:2]
+        self.video_writer = cv2.VideoWriter(
+            self.current_filename,
+            cv2.VideoWriter_fourcc(*'XVID'),
+            20.0,  # FPS
+            (width, height)
+        )
+        
+        self.recording = True
+        self.recording_thread = threading.Thread(target=self._record_loop)
+        self.recording_thread.daemon = True
+        self.recording_thread.start()
+        return True
+        
+    def stop_recording(self):
+        """Stop current recording"""
+        if not self.recording:
+            return False
+            
+        self.recording = False
+        if self.recording_thread:
+            self.recording_thread.join()
+        
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
+            
+        return self.current_filename
+        
+    def _record_loop(self):
+        """Main recording loop"""
+        while self.recording:
+            frame = self.camera.value
+            if frame is not None:
+                self.video_writer.write(frame)
+            time.sleep(0.05)  # 20 FPS
+            
+    def get_recorded_videos(self):
+        """Get list of all recorded videos"""
+        if not os.path.exists(self.videos_dir):
+            return []
+        return sorted([f for f in os.listdir(self.videos_dir) if f.endswith('.avi')])
+        
+    def replay_video(self, filename=None):
+        """Replay a recorded video"""
+        if filename is None and self.current_filename:
+            filename = self.current_filename
+        elif filename:
+            filename = os.path.join(self.videos_dir, filename)
+            
+        if not filename or not os.path.exists(filename):
+            raise FileNotFoundError("Video file not found")
+            
+        return cv2.VideoCapture(filename)
+    
+class EnhancedJetBotUI:
+    def __init__(self):
+        # Initialize robot controller and other components
+        self.robot_controller = EnhancedRobotController()  # Assuming this class is defined elsewhere
+        self.nlp_processor = EnhancedNLPCommandProcessor(self.robot_controller)
+        self.camera = Camera.instance(width=224, height=224)  # Assuming Camera is defined elsewhere
+        self.video_recorder = VideoRecorder(self.camera)  # Assuming VideoRecorder is defined elsewhere
+        
+        # Initialize chat history
+        self.chat_history = []  # To store chat messages
+        
+        # Set up the UI
+        self._setup_ui()
+        
+        # Display initial bot message
+        self._add_bot_message("Hello! I'm your JetBot. Type a command to get started.")
+
+    def _setup_ui(self):
+        """Set up an enhanced, chat-like UI with interactive elements."""
+        from IPython.display import display, HTML
+
+        # Inject custom CSS for styling
+        display(HTML("""
+            <style>
+                .jetbot-ui h1, .jetbot-ui h3 { font-family: 'Roboto', sans-serif; }
+                .jetbot-ui .camera-feed { border: 2px solid #4CAF50; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); }
+                .jetbot-ui .status-box { background-color: #f9f9f9; padding: 10px; border-radius: 5px; }
+                .jetbot-ui .control-panel button:hover { background-color: #45a049; }
+                .jetbot-ui .chat-container { max-height: 300px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px; padding: 10px; margin-bottom: 10px; }
+                .jetbot-ui .user-message { background-color: #DCF8C6; color: #333; padding: 10px; border-radius: 10px; margin: 5px 0; align-self: flex-end; max-width: 70%; }
+                .jetbot-ui .bot-message { background-color: #ECECEC; color: #333; padding: 10px; border-radius: 10px; margin: 5px 0; align-self: flex-start; max-width: 70%; }
+                .jetbot-ui .timestamp { font-size: 10px; color: #aaa; text-align: right; display: block; margin-top: 2px; }
+                .jetbot-ui .text-input { border: 1px solid #ccc; border-radius: 20px; padding: 10px; width: 80%; }
+                .jetbot-ui .submit-button { background-color: #4CAF50; color: white; border: none; padding: 10px 15px; border-radius: 20px; cursor: pointer; margin-left: 10px; }
+                .jetbot-ui .submit-button:hover { background-color: #45a049; }
+            </style>
+        """))
+
+        # Camera widget with proper format and dimensions
+        self.camera_widget = widgets.Image(
+            format='jpeg',
+            width=384,
+            height=288,
+            layout=widgets.Layout(border="2px solid #4CAF50", box_shadow="0 4px 8px rgba(0, 0, 0, 0.1)")
+        )
+
+        # Create camera link using traitlets
+        self.camera_link = traitlets.dlink(
+            (self.camera, 'value'),
+            (self.camera_widget, 'value'),
+            transform=bgr8_to_jpeg
+        )
+
+        # Chat container to display messages
+        self.chat_container = widgets.Output(layout=widgets.Layout(max_height="300px", overflow_y="auto", border="1px solid #ccc", border_radius="5px", padding="10px", margin_bottom="10px"))
+
+        # Command input with autocomplete and submit button
+        self.text_input = widgets.Text(
+            placeholder='Type a command...',
+            layout=widgets.Layout(width='80%', margin='10px 0')
+        )
+
+        # Submit button to mimic "Enter" key functionality
+        self.submit_button = widgets.Button(
+            description="Send",
+            button_style='success',
+            tooltip="Submit the command",
+            layout=widgets.Layout(margin='10px 0')
+        )
+
+        # Bind the submit button to the same handler as the Enter key
+        self.submit_button.on_click(lambda _: self._handle_command(self.text_input))
+
+        # Status display with multiple metrics
+        self.status_label = widgets.HTML(
+            value=self._get_status_html(),
+            layout=widgets.Layout(padding="10px", background_color="#f9f9f9", border_radius="5px")
+        )
+
+        # Create control panel buttons with proper callbacks
+        self.control_panel = self._create_control_panel()
+
+        # Layout adjustments for a modern look
+        self.ui = widgets.VBox([
+            widgets.HTML(
+                value="<h1 style='text-align: center; color: #4CAF50;'>🤖 Enhanced JetBot Control Center</h1>",
+                layout=widgets.Layout(margin='10px 0')
+            ),
+            widgets.HBox([
+                widgets.VBox([
+                    widgets.HTML(value="<h3 style='color: #2196F3;'>📷 Live Camera Feed:</h3>"),
+                    self.camera_widget,
+                    widgets.VBox([
+                        self.chat_container,
+                        widgets.HBox([self.text_input, self.submit_button], layout=widgets.Layout(justify_content="flex-start"))
+                    ], layout=widgets.Layout(width='100%')),
+                    self.control_panel
+                ], layout=widgets.Layout(width='50%', margin='0px')),
+                widgets.VBox([
+                    widgets.HTML(value="<h3 style='color: #2196F3;'>📊 Robot Status:</h3>"),
+                    self.status_label
+                ], layout=widgets.Layout(width='50%', margin='0px'))
+            ], layout=widgets.Layout(margin='0px', justify_content="space-between"))
+        ], layout=widgets.Layout(padding='10px', border='2px solid #4CAF50', border_radius='5px'))
+
+        # Bind events
+        self.text_input.on_submit(self._handle_command)
+
+    def _add_user_message(self, message):
+        """Add a user message to the chat container."""
+        timestamp = datetime.now().strftime("%H:%M")
+        with self.chat_container:
+            display(HTML(f"""
+                <div class="user-message">
+                    {message}
+                    <span class="timestamp">{timestamp}</span>
+                </div>
+            """))
+
+    def _add_bot_message(self, message):
+        """Add a bot response to the chat container."""
+        timestamp = datetime.now().strftime("%H:%M")
+        with self.chat_container:
+            display(HTML(f"""
+                <div class="bot-message">
+                    {message}
+                    <span class="timestamp">{timestamp}</span>
+                </div>
+            """))
+
+    def _handle_command(self, input_widget):
+        """Handle user commands and update the chat."""
+        command = input_widget.value.strip()
+        if command:
+            # Add user message to chat
+            self._add_user_message(command)
+            
+            # Process the command (replace with your logic)
+            response = f"Executing: {command}"
+            self._add_bot_message(response)
+            
+            # Clear the input field
+            input_widget.value = ""
+
+    def _get_status_html(self):
+        """Generate HTML for the status display."""
+        return "<p>Status: Idle</p>"
+
+    def _create_control_panel(self):
+        """Create the control panel with buttons."""
+        return widgets.VBox([
+            widgets.Button(description="Move Forward", button_style='info'),
+            widgets.Button(description="Turn Left", button_style='info'),
+            widgets.Button(description="Turn Right", button_style='info'),
+            widgets.Button(description="Stop", button_style='danger')
+        ])
+    def _handle_command(self, widget):
+        """Handle text command input"""
+        try:
+            command_text = widget.value
+            response = self.nlp_processor.process_command(command_text)
+            self._update_status(response)
+        except Exception as e:
+            self._update_status(f"Command error: {str(e)}")
+        finally:
+            self.text_input.value = ""
+
+
+    def _create_control_panel(self):
+        """Create control panel with working buttons and callbacks"""
+        # Movement buttons with callbacks
+        left_btn = widgets.Button(description='⬅️', layout=widgets.Layout(width='60px'))
+        right_btn = widgets.Button(description='➡️', layout=widgets.Layout(width='60px'))
+        forward_btn = widgets.Button(description='⬆️', layout=widgets.Layout(width='60px'))
+        backward_btn = widgets.Button(description='⬇️', layout=widgets.Layout(width='60px'))
+
+        # Add button callbacks
+        left_btn.on_click(lambda b: self._handle_movement('left'))
+        right_btn.on_click(lambda b: self._handle_movement('right'))
+        forward_btn.on_click(lambda b: self._handle_movement('forward'))
+        backward_btn.on_click(lambda b: self._handle_movement('backward'))
+
+        # Movement controls layout
+        movement_controls = widgets.HBox([
+            left_btn,
+            widgets.VBox([forward_btn, backward_btn]),
+            right_btn
+        ])
+
+        # Speed control with callback
+        speed_slider = widgets.FloatSlider(
+            value=0.2,
+            min=0,
+            max=1.0,
+            step=0.1,
+            description='Speed:',
+            continuous_update=True
+        )
+        speed_slider.observe(self._handle_speed_change, names='value')
+
+        # Pattern selection with callback
+        pattern_dropdown = widgets.Dropdown(
+            options=['Square', 'Triangle', 'Circle', 'Spiral', 'ZigZag'],
+            description='Pattern:',
+            layout=widgets.Layout(width='200px')
+        )
+        pattern_dropdown.observe(self._handle_pattern_select, names='value')
+
+        # Recording controls with callbacks
+        self.record_btn = widgets.Button(
+            description='⏺️ Record',
+            layout=widgets.Layout(width='100px')
+        )
+        self.stop_btn = widgets.Button(
+            description='⏹️ Stop',
+            layout=widgets.Layout(width='100px'),
+            disabled=True
+        )
+        self.replay_btn = widgets.Button(
+            description='▶️ Replay',
+            layout=widgets.Layout(width='100px')
+        )
+
+        # Video selection dropdown for replay
+        self.video_dropdown = widgets.Dropdown(
+            options=self.video_recorder.get_recorded_videos(),
+            description='Videos:',
+            layout=widgets.Layout(width='200px')
+        )
+
+        # Bind recording controls
+        self.record_btn.on_click(self._handle_record)
+        self.stop_btn.on_click(self._handle_stop)
+        self.replay_btn.on_click(self._handle_replay)
+
+        recording_controls = widgets.VBox([
+            widgets.HBox([self.record_btn, self.stop_btn, self.replay_btn]),
+            self.video_dropdown
+        ])
+
+        # Return the complete control panel as a VBox containing all controls
+        return widgets.VBox([
+            widgets.Label(value="Movement Controls:"),
+            movement_controls,
+            widgets.Label(value="Speed Control:"),
+            speed_slider,
+            widgets.Label(value="Pattern Selection:"),
+            pattern_dropdown,
+            widgets.Label(value="Recording Controls:"),
+            recording_controls
+        ])
+
+    
+    def _handle_record(self, b):
+        """Handle record button click"""
+        if self.video_recorder.start_recording():
+            self.record_btn.disabled = True
+            self.stop_btn.disabled = False
+            self._update_status("Recording started...")
+    
+    def _handle_stop(self, b):
+        """Handle stop button click"""
+        filename = self.video_recorder.stop_recording()
+        if filename:
+            self.record_btn.disabled = False
+            self.stop_btn.disabled = True
+            self._update_status(f"Recording saved: {os.path.basename(filename)}")
+            # Update video dropdown
+            self.video_dropdown.options = self.video_recorder.get_recorded_videos()
+    
+    def _handle_replay(self, b):
+        """Handle replay button click"""
+        try:
+            selected_video = self.video_dropdown.value
+            if not selected_video:
+                self._update_status("Please select a video to replay")
+                return
+                
+            cap = self.video_recorder.replay_video(selected_video)
+            if not cap.isOpened():
+                self._update_status("Error opening video file")
+                return
+                
+            # Disable controls during replay
+            self.record_btn.disabled = True
+            self.replay_btn.disabled = True
+            
+            # Start replay thread
+            threading.Thread(target=self._replay_video_thread, args=(cap,), daemon=True).start()
+            
+        except Exception as e:
+            self._update_status(f"Replay error: {str(e)}")
+    
+    def _replay_video_thread(self, cap):
+        """Thread for video replay"""
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # Convert frame to jpeg and update display
+                self.camera_widget.value = bgr8_to_jpeg(frame)
+                time.sleep(0.05)  # 20 FPS
+                
+        finally:
+            cap.release()
+            # Re-enable controls
+            self.record_btn.disabled = False
+            self.replay_btn.disabled = False
+            self._update_status("Replay finished")
+    
+    def _handle_movement(self, direction):
+        """Handle movement button clicks"""
+        try:
+            if direction == 'left':
+                self.robot_controller.turn_left(90)
+            elif direction == 'right':
+                self.robot_controller.turn_right(90)
+            elif direction == 'forward':
+                self.robot_controller.move_forward(steps=1)
+            elif direction == 'backward':
+                self.robot_controller.move_backward(steps=1)
+            
+            self._update_status(f"Moving {direction}")
+        except Exception as e:
+            self._update_status(f"Movement error: {str(e)}")
+    
+    def _handle_speed_change(self, change):
+        """Handle speed slider changes"""
+        try:
+            self.robot_controller.set_speed(change['new'])
+            self._update_status(f"Speed set to {change['new']:.1f}")
+        except Exception as e:
+            self._update_status(f"Speed change error: {str(e)}")
+    
+    def _handle_pattern_select(self, change):
+        """Handle pattern selection"""
+        try:
+            pattern = change['new'].lower()
+            if pattern in self.robot_controller.shapes:
+                self.robot_controller.shapes[pattern]()
+                self._update_status(f"Executing {pattern} pattern")
+        except Exception as e:
+            self._update_status(f"Pattern error: {str(e)}")
+    
+    def _handle_recording(self, action):
+        """Handle recording button actions"""
+        try:
+            if action == 'start':
+                self.robot_controller.record_path()
+                self._update_status("Started recording")
+            elif action == 'stop':
+                self.robot_controller.is_recording = False
+                self._update_status("Stopped recording")
+            elif action == 'replay':
+                self.robot_controller.replay_path()
+                self._update_status("Replaying recorded path")
+        except Exception as e:
+            self._update_status(f"Recording error: {str(e)}")
+    
+
+    
+    def _update_status(self, message):
+        """Update status display with new message"""
+        self.status_label.value = self._get_status_html() + f"<p>{message}</p>"
+    
+    def _get_status_html(self):
+        """Generate status HTML with current robot state"""
+        state = self.robot_controller.state
+        return f"""
+        <div style="padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
+            <h3>Robot Status</h3>
+            <p>Position: ({state.position['x']:.2f}, {state.position['y']:.2f})</p>
+            <p>Orientation: {state.position['orientation']}°</p>
+            <p>Speed: {state.speed:.2f}</p>
+            <p>Battery: {state.battery_level}%</p>
+        </div>
+        """
+    
+    def _start_camera_thread(self):
+        """Start camera update thread"""
+        def update_camera():
+            while True:
+                try:
+                    frame = self.camera.value
+                    self.camera_widget.value = frame.tobytes()
+                except Exception as e:
+                    logger.error(f"Camera update error: {str(e)}")
+                time.sleep(0.1)
+        
+        camera_thread = threading.Thread(target=update_camera, daemon=True)
+        camera_thread.start()
+    
+    def display(self):
+        """Display the UI"""
+        display(self.ui)
+# Initialize and display enhanced UI
+jetbot_ui = EnhancedJetBotUI()
+jetbot_ui.display()  # end of the code      
